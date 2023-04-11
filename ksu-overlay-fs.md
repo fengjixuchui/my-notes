@@ -97,7 +97,7 @@ HuskyDG 的 magisk_overlayfs ，或许处理了这个问题，因为它的处理
 
 ### Magisk
 
-Magisk 存在多年的 overlayfs 不兼容问题，前段时间被西大师的 PR 解决：
+Magisk 存在多年的 overlayfs 不兼容问题，前段时间被西大师的 PR 解决（即将出现在 Magisk 26.1）：
 
 [Refactor magic mount to support overlayfs by yujincheng08 · Pull Request #6588 · topjohnwu/Magisk](https://github.com/topjohnwu/Magisk/pull/6588/commits/5817cda0a4b30d18d48a04613fe1ed47f3e0a01d)
 
@@ -135,7 +135,7 @@ Magisk 存在多年的 overlayfs 不兼容问题，前段时间被西大师的 P
 | - 3 /system/yyy bind mount
 | - 4 /system (ksu overlay)
     | - 5 /system/xxx (ksu overlay)
-	| - 6 /system/yyy (ksu overlay)
+    | - 6 /system/yyy (ksu overlay)
 ```
 
 这样的问题是，每一个 ksu overlay 都需要 lowerdir 提供原先目录的内容，然而在 `/system` 下挂载第一个 overlay 后，原先的内容被屏蔽了，怎么得到 lowerdir 呢？
@@ -178,7 +178,7 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
 
 方法无非两个：选择另一个空的目录作为 upperdir 或加入 lowerdir 。
 
-考虑到节省系统资源，我们 mount 一个大小 0k 的只读 tmpfs ，作为所有 lowerdir 单一的挂载点的填充。
+考虑到节省系统资源，我们 mount 一个大小 0k 的只读 tmpfs ，作为所有 lowerdir 单一的挂载点的填充（dummy tmpfs）。
 
 注意这种情况下，它必须作为 lowerdir 的最下层，否则文件会被加上奇怪的 t 属性位。
 
@@ -193,14 +193,24 @@ static struct ovl_entry *ovl_get_lowerstack(struct super_block *sb,
 在群里讨论之后，发现上面的做法仍然存在问题，比如 vfat 无法作为 overlay 的 lowerdir (`/vendor/bt_firmware`)，这种情况下也许只能 fallback 为 bind mount 了。
 
 > 也就是说，不能修改上面的文件，不过应该没人会改 firmware 吧。
- 
-此外还有直接 bind mount 一个文件的奇葩情况（上文的 GSI 系统就属此例），overlayfs 也没法处理。这种情况下我们可以判断，也许还可以同时把模块的相应文件 bind mount 上来。
 
 如果系统会叠两层 overlayfs 也无法处理。总之，mount overlay 失败的时候，fallback 成 mount bind 原目录 /proc/self/fd 是比较好的方法，起码确保了系统原始文件完整，而大部分模块也能正常工作。
+ 
+此外还有直接 bind mount 一个文件的奇葩情况（上文的 GSI 系统就属此例），此时原挂载点不能作为 overlayfs 的 lowerdir 。
+
+重新考虑了一下，新方案可以处理 regular file bind mount 的情况：
+
+1. 挂载点下没有模块修改，此时也不需要 overlay 了，直接 bind mount （dummy tmpfs 可以丢掉了）。  
+2. 挂载点下有模块修改，原本是目录，此时 overlay ，合并模块和 stock 挂载点。  
+3. 挂载点下有模块修改，原本是普通文件，此时不需要任何 mount （因为没有旧目录需要合并），下层的 overlay 处理了一切。  
+
+判断 stock mount 是不是 regular file 只要 stat 我们打开的 fd 即可
 
 ## POC
 
-https://gist.github.com/5ec1cff/d3f7623ab0feae082d6b7854e85b1112
+https://github.com/5ec1cff/ksu-mount-POC
+
+~~由于不会 Rust 只好用 C++ 写了~~
 
 ### 实现分析
 
@@ -262,7 +272,7 @@ findChildMountForPath： 找某个路径的直接子挂载点下的最上层挂�
     | 7 - /system/xxx
   | 3 - /system/yyy
       | 4 - /system/yyy
-	    | 5 - /system/yyy/zzz
+        | 5 - /system/yyy/zzz
 ```
 
 则 findChildMountForPath 找到的是 4, 7 。
